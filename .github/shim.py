@@ -1,13 +1,36 @@
-import http.server
-import socketserver
-import json
+"""
+Прокси-заглушка для ForgeGradle 2.0.2.
+
+В плагине зашиты адреса, которых больше не существует:
+  export.mcpbot.bspk.rs                — MCPBot закрыт в 2022, домен не резолвится
+  s3.amazonaws.com/Minecraft.Download  — Mojang вывел из эксплуатации, 404
+  files.minecraftforge.net/maven       — отвечает 301, а плагин не ходит по редиректам
+
+Сборка ходит на них по HTTP, поэтому JVM заворачивается сюда через
+http.proxyHost / http.proxyPort в gradle.properties. Нужные файлы берутся
+с живых зеркал, всё остальное проксируется прозрачно.
+
+HTTPS сюда не идёт: https.proxyHost не выставлен, maven репозитории
+работают напрямую.
+"""
+
 import hashlib
+import http.server
+import json
+import socketserver
+import sys
+import urllib.parse
 import urllib.request
+
+DEFAULT_PORT = 8080
 
 MCP_MAVEN = "https://maven.minecraftforge.net/de/oceanlabs/mcp"
 FORGE_MAVEN = "https://maven.minecraftforge.net"
 MANIFEST = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
-UA = {"User-Agent": "Mozilla/5.0 ForgeGradle-shim"}
+
+# Свой opener без прокси, иначе заглушка может зациклиться сама на себя.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+OPENER.addheaders = [("User-Agent", "ForgeGradle-shim/1.0")]
 
 MCP_VERSIONS = json.dumps({
     "1.8.9": {
@@ -18,8 +41,8 @@ MCP_VERSIONS = json.dumps({
     }
 }).encode()
 
-# Заглушка для промо-джейсона Forge: он больше не отдаётся, но нужен
-# плагину только для информационного сообщения о версиях.
+# Промо-джейсон Forge не отдаётся вообще, а нужен плагину только для
+# информационной строчки в логе. Отдаём пустую, но валидную структуру.
 FORGE_PROMOS = json.dumps({
     "homepage": "https://files.minecraftforge.net/",
     "name": "Forge",
@@ -31,7 +54,7 @@ FORGE_PROMOS = json.dumps({
     "webpath": "https://maven.minecraftforge.net/net/minecraftforge/forge",
 }).encode()
 
-_version_cache = {}
+_versions = {}
 _asset_index = {}
 
 
@@ -40,103 +63,122 @@ def log(msg):
 
 
 def fetch(url):
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return r.read(), r.headers.get("Content-Type", "application/octet-stream")
+    with OPENER.open(url, timeout=180) as resp:
+        return resp.read(), resp.headers.get("Content-Type", "application/octet-stream")
 
 
 def version_json(ver):
-    """Достаёт манифест версии с живого launchermeta вместо мёртвого s3."""
-    if ver in _version_cache:
-        return _version_cache[ver]
+    """Берёт манифест версии с launchermeta вместо мёртвого s3."""
+    if ver in _versions:
+        return _versions[ver]
     body, _ = fetch(MANIFEST)
-    manifest = json.loads(body)
     url = None
-    for entry in manifest.get("versions", []):
+    for entry in json.loads(body).get("versions", []):
         if entry.get("id") == ver:
             url = entry.get("url")
             break
     if url is None:
-        raise KeyError("version " + ver + " not in manifest")
+        raise KeyError("version " + ver + " not found in manifest")
     body, _ = fetch(url)
     data = json.loads(body)
-    _version_cache[ver] = (body, data)
-    idx = data.get("assetIndex")
-    if idx and idx.get("id") and idx.get("url"):
-        _asset_index[idx["id"]] = idx["url"]
-    log("version json for " + ver + " resolved via launchermeta")
-    return _version_cache[ver]
+    _versions[ver] = (body, data)
+    index = data.get("assetIndex") or {}
+    if index.get("id") and index.get("url"):
+        _asset_index[index["id"]] = index["url"]
+    log("manifest " + ver + " resolved via launchermeta")
+    return _versions[ver]
 
 
 def mojang_route(path):
-    """Отдаёт то, что раньше лежало на s3.amazonaws.com/Minecraft.Download."""
+    """Восстанавливает то, что лежало на s3.amazonaws.com/Minecraft.Download."""
     parts = [p for p in path.split("?")[0].split("/") if p]
-    if len(parts) >= 4 and parts[0] == "Minecraft.Download" and parts[1] == "versions":
+    if len(parts) < 3 or parts[0] != "Minecraft.Download":
+        return None, None
+
+    if parts[1] == "versions" and len(parts) >= 4:
         ver = parts[2]
         name = parts[3]
         if name.endswith(".json"):
             body, _ = version_json(ver)
             return body, "application/json"
         if name.endswith(".jar"):
-            _, data = version_json(ver)
+            data = version_json(ver)[1]
             kind = "server" if "server" in name else "client"
-            url = data.get("downloads", {}).get(kind, {}).get("url")
+            url = (data.get("downloads") or {}).get(kind, {}).get("url")
             if not url:
                 return None, None
-            log("proxying " + kind + " jar for " + ver)
+            log("proxying " + kind + " jar " + ver)
             return fetch(url)
-    if len(parts) >= 3 and parts[0] == "Minecraft.Download" and parts[1] == "indexes":
+
+    if parts[1] == "indexes":
         name = parts[2][:-5] if parts[2].endswith(".json") else parts[2]
         if name not in _asset_index:
             try:
                 version_json("1.8.9")
-            except Exception:
-                pass
+            except Exception as exc:
+                log("asset index lookup failed: " + repr(exc))
         url = _asset_index.get(name)
         if url:
             return fetch(url)
+
     return None, None
 
 
 def resolve(host, path):
-    """Возвращает (тело, тип) либо (None, None), если адрес не наш."""
+    """Возвращает (тело, тип) либо (None, None) для 404."""
     host = host.split(":")[0].lower()
 
     if host == "export.mcpbot.bspk.rs":
-        if path.startswith("/versions.json"):
+        if path.split("?")[0] == "/versions.json":
             return MCP_VERSIONS, "application/json"
         return fetch(MCP_MAVEN + path)
 
-    if host in ("files.minecraftforge.net", "www.files.minecraftforge.net"):
+    if host.endswith("files.minecraftforge.net"):
         rest = path[len("/maven"):] if path.startswith("/maven") else path
-        if rest.rstrip("/").endswith("/net/minecraftforge/forge/json"):
+        if rest.split("?")[0].rstrip("/").endswith("/net/minecraftforge/forge/json"):
             return FORGE_PROMOS, "application/json"
         return fetch(FORGE_MAVEN + rest)
 
-    if host in ("s3.amazonaws.com", "resources.download.minecraft.net"):
+    if host == "s3.amazonaws.com":
         return mojang_route(path)
 
-    return None, None
+    # Любой другой адрес проксируем как есть: через нас идёт весь HTTP сборки,
+    # включая живой resources.download.minecraft.net и прочее.
+    return fetch("http://" + host + path)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def _serve(self, with_body):
-        host = self.headers.get("Host", "")
+    def target(self):
+        """В режиме прокси клиент присылает полный URL, а не путь."""
+        raw = self.path
+        if raw.startswith("http://") or raw.startswith("https://"):
+            split = urllib.parse.urlsplit(raw)
+            path = urllib.parse.urlunsplit(("", "", split.path or "/", split.query, ""))
+            return split.netloc, path
+        return self.headers.get("Host", ""), raw
+
+    def serve(self, with_body):
+        host, path = self.target()
         try:
-            body, ctype = resolve(host, self.path)
+            body, ctype = resolve(host, path)
         except Exception as exc:
-            log("ERROR " + host + self.path + " -> " + repr(exc))
-            self.send_error(502, "shim upstream failure")
+            log("ERROR " + host + path + " -> " + repr(exc))
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
             return
+
         if body is None:
-            log("404 " + host + self.path)
+            log("404 " + host + path)
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        log("200 " + host + self.path + " (" + str(len(body)) + " bytes)")
+
+        log("200 " + host + path + " (" + str(len(body)) + " bytes)")
         self.send_response(200)
         self.send_header("Content-Type", ctype or "application/octet-stream")
         self.send_header("Content-Length", str(len(body)))
@@ -147,10 +189,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self):
-        self._serve(True)
+        self.serve(True)
 
     def do_HEAD(self):
-        self._serve(False)
+        self.serve(False)
 
     def log_message(self, fmt, *args):
         pass
@@ -162,5 +204,6 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 if __name__ == "__main__":
-    log("listening on 127.0.0.1:80")
-    Server(("127.0.0.1", 80), Handler).serve_forever()
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
+    log("listening on 127.0.0.1:" + str(port))
+    Server(("127.0.0.1", port), Handler).serve_forever()
