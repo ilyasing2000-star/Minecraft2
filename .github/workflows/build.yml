@@ -25,86 +25,54 @@ jobs:
           unzip -q gradle-2.14.1-bin.zip -d $HOME
           echo "$HOME/gradle-2.14.1/bin" >> $GITHUB_PATH
 
-      # MCPBot (export.mcpbot.bspk.rs) выключен в 2022 году, домен больше
-      # не существует. ForgeGradle 2.0.2 всё равно ходит на него за
-      # versions.json и падает. Поднимаем локальную заглушку на порту 80
-      # и заворачиваем этот домен на 127.0.0.1 через /etc/hosts.
-      # versions.json отдаём свой, всё остальное перенаправляем
-      # на живое зеркало маппингов в maven Forge.
-      - name: MCPBot shim
-        run: |
-          cat > /tmp/versions.json <<'JSON'
-          {
-            "1.8.9": {
-              "stable": [22, 20],
-              "stable_nodoc": [22, 20],
-              "snapshot": [20161208, 20160312],
-              "snapshot_nodoc": [20161208, 20160312]
-            }
-          }
-          JSON
-          cat > /tmp/shim.py <<'PY'
-          import http.server, socketserver, hashlib
-
-          MAVEN = "https://maven.minecraftforge.net/de/oceanlabs/mcp"
-          DATA = open("/tmp/versions.json", "rb").read()
-          ETAG = '"' + hashlib.md5(DATA).hexdigest() + '"'
-
-          class H(http.server.BaseHTTPRequestHandler):
-              protocol_version = "HTTP/1.1"
-
-              def do_GET(self):
-                  if self.path.startswith("/versions.json"):
-                      self.send_response(200)
-                      self.send_header("Content-Type", "application/json")
-                      self.send_header("Content-Length", str(len(DATA)))
-                      self.send_header("ETag", ETAG)
-                      self.end_headers()
-                      self.wfile.write(DATA)
-                  else:
-                      self.send_response(302)
-                      self.send_header("Location", MAVEN + self.path)
-                      self.send_header("Content-Length", "0")
-                      self.end_headers()
-
-              def do_HEAD(self):
-                  self.do_GET()
-
-              def log_message(self, fmt, *args):
-                  print("shim: " + (fmt % args), flush=True)
-
-          socketserver.TCPServer.allow_reuse_address = True
-          httpd = socketserver.TCPServer(("127.0.0.1", 80), H)
-          httpd.serve_forever()
-          PY
-          echo "127.0.0.1 export.mcpbot.bspk.rs" | sudo tee -a /etc/hosts
-          sudo nohup python3 /tmp/shim.py > /tmp/shim.log 2>&1 &
-          sleep 3
-          echo "--- проверка заглушки ---"
-          curl -sS http://export.mcpbot.bspk.rs/versions.json
-          echo
-
       - name: Cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: forge189-${{ hashFiles('**/*.gradle') }}
-          restore-keys: forge189-
+          key: forge189-v3-${{ hashFiles('**/*.gradle') }}
+          restore-keys: forge189-v3-
 
-      # Качает Forge и MCP и декомпилирует майнкрафт.
-      # Первый запуск минут пятнадцать, дальше берётся из кеша.
-      - name: setupDecompWorkspace
-        run: gradle setupDecompWorkspace --no-daemon --stacktrace
+      # Заглушка и сборка идут одним шагом: фоновый процесс не гарантированно
+      # живёт до следующего шага. Маршрутизация — через systemProp в
+      # gradle.properties, так как сборка идёт в отдельной форкнутой JVM.
+      - name: Сборка
+        run: |
+          # Прошлые падения могли оставить в кеше битые манифесты.
+          rm -rf ~/.gradle/caches/minecraft
 
-      - name: build
-        run: gradle build --no-daemon --stacktrace
+          python3 .github/shim.py 8080 > /tmp/shim.log 2>&1 &
+          SHIM_PID=$!
+          trap "kill $SHIM_PID 2>/dev/null || true" EXIT
 
-      # Лог заглушки: видно, какие адреса дёргал ForgeGradle.
-      - name: shim log
+          for i in $(seq 1 20); do
+            if curl -sf -x http://127.0.0.1:8080 http://export.mcpbot.bspk.rs/versions.json > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo "--- versions.json через заглушку ---"
+          curl -sS -x http://127.0.0.1:8080 http://export.mcpbot.bspk.rs/versions.json
+          echo
+          echo "--- манифест 1.8.9 через заглушку ---"
+          curl -sS -x http://127.0.0.1:8080 \
+            http://s3.amazonaws.com/Minecraft.Download/versions/1.8.9/1.8.9.json | head -c 300
+          echo
+          echo "--- промо-джейсон Forge через заглушку ---"
+          curl -sS -o /dev/null -w 'HTTP %{http_code}\n' -x http://127.0.0.1:8080 \
+            http://files.minecraftforge.net/maven/net/minecraftforge/forge/json
+
+          # Качает Forge и MCP и декомпилирует майнкрафт.
+          # Первый запуск минут пятнадцать, дальше берётся из кеша.
+          gradle setupDecompWorkspace --no-daemon --stacktrace
+          gradle build --no-daemon --stacktrace
+
+      # Видно, какие адреса дёргал ForgeGradle и что им отдала заглушка.
+      - name: Лог заглушки
         if: always()
-        run: cat /tmp/shim.log || true
+        run: tail -n 200 /tmp/shim.log || true
 
       - name: artifact
         uses: actions/upload-artifact@v4
