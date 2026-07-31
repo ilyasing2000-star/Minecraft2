@@ -41,17 +41,44 @@ MCP_VERSIONS = json.dumps({
     }
 }).encode()
 
-# Промо-джейсон Forge не отдаётся вообще, а нужен плагину только для
-# информационной строчки в логе. Отдаём пустую, но валидную структуру.
+# Список сборок Forge. Ветка ForgeGradle 2.3 без него отказывается
+# признавать версию из build.gradle: ForgeExtension.checkAndSetVersion сверяет
+# номер сборки именно по этому джейсону. Настоящий адрес мёртв,
+# поэтому собираем структуру сами с единственной нужной сборкой.
+# В схеме Forge последний компонент версии — это и есть номер
+# сборки: 11.15.1.2318 -> 2318. Ветка у сборок 1.8.9 называется "1.8.9",
+# оттуда и третий кусок в "1.8.9-11.15.1.2318-1.8.9".
+FORGE_MC = "1.8.9"
+FORGE_BUILD = 2318
+FORGE_VER = "11.15.1.2318"
+FORGE_BRANCH = "1.8.9"
+FORGE_LONG = "%s-%s-%s" % (FORGE_MC, FORGE_VER, FORGE_BRANCH)
+
 FORGE_PROMOS = json.dumps({
     "homepage": "https://files.minecraftforge.net/",
     "name": "Forge",
-    "branches": {},
-    "mcversion": {},
-    "promos": {},
-    "number": {},
+    "artifact": "forge",
     "adfocus": "",
     "webpath": "https://maven.minecraftforge.net/net/minecraftforge/forge",
+    "branches": {FORGE_BRANCH: [FORGE_BUILD]},
+    "mcversion": {FORGE_MC: [FORGE_BUILD]},
+    "number": {
+        str(FORGE_BUILD): {
+            "branch": FORGE_BRANCH,
+            "build": FORGE_BUILD,
+            "mcversion": FORGE_MC,
+            "version": FORGE_VER,
+            "modified": 1451606400,
+            "files": [
+                ["jar", "universal", "0" * 32],
+                ["jar", "userdev", "0" * 32],
+            ],
+        }
+    },
+    "promos": {
+        FORGE_MC + "-latest": FORGE_BUILD,
+        FORGE_MC + "-recommended": FORGE_BUILD,
+    },
 }).encode()
 
 _versions = {}
@@ -136,15 +163,12 @@ def resolve(host, path):
     if host.endswith("files.minecraftforge.net"):
         rest = path[len("/maven"):] if path.startswith("/maven") else path
         if rest.split("?")[0].rstrip("/").endswith("/net/minecraftforge/forge/json"):
-            # Здесь надо ответить ИМЕННО неуспехом, и это не лень.
-            # ForgeExtension.checkAndSetVersion сверяет номер сборки со списком
-            # из этого джейсона. Настоящий список не отдаётся уже ниоткуда,
-            # а любой синтетический приводит к "No such version exists!".
-            # Когда джейсон не загрузился, плагин пропускает проверку и
-            # берёт версию из build.gradle как есть — ровно то, что нужно.
-            # Цена — одна строка "Error occurred parsing version!" в логе.
-            log("promos json: отдаю 404 нарочно, чтобы плагин пропустил проверку версии")
-            return None, None
+            # Раньше здесь стоял нарочный 404: ветка 2.0.2 при валидном
+            # джейсоне включала проверку версии и падала. Ветка 2.3
+            # ведёт себя ровно наоборот: без списка сборок она говорит
+            # "No such version exists!" на строке version в блоке minecraft.
+            log("promos json: отдаю список сборок с %s" % FORGE_LONG)
+            return FORGE_PROMOS, "application/json"
         return fetch(FORGE_MAVEN + rest)
 
     if host == "s3.amazonaws.com":
