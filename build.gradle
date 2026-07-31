@@ -1,0 +1,48 @@
+buildscript {
+    repositories {
+        mavenCentral()
+        // Старый адрес files.minecraftforge.net/maven из шаблонов 2016 года
+        // больше не работает и даёт невнятную ошибку резолва зависимостей.
+        maven { name = "forge";    url = "https://maven.minecraftforge.net/" }
+        maven { name = "sonatype"; url = "https://oss.sonatype.org/content/repositories/snapshots/" }
+    }
+    dependencies {
+        // ForgeGradle 2.0.2 — единственная ветка, работающая с 1.8.9.
+        // Требует JDK 8 и Gradle 2.14.1, на более новых падает.
+        classpath 'net.minecraftforge.gradle:ForgeGradle:2.0.2'
+    }
+}
+
+apply plugin: 'net.minecraftforge.gradle.forge'
+
+version = "1.0"
+group = "me.macro.blockhit"
+archivesBaseName = "autoblockhit"
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+// Без этого кириллица в сообщениях чата превратится в мусор.
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
+minecraft {
+    version = "1.8.9-11.15.1.2318-1.8.9"
+    runDir = "run"
+    mappings = "stable_22"
+    makeObfSourceJar = false
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "mcversion", project.minecraft.version
+
+    from(sourceSets.main.resources.srcDirs) {
+        include 'mcmod.info'
+        expand 'version': project.version, 'mcversion': project.minecraft.version
+    }
+    from(sourceSets.main.resources.srcDirs) {
+        exclude 'mcmod.info'
+    }
+}

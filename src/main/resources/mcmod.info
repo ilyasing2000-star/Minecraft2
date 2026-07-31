@@ -1,0 +1,15 @@
+[
+  {
+    "modid": "autoblockhit",
+    "name": "Auto BlockHit",
+    "description": "Автоматический блок мечом: блок стоит заранее, до чужого удара, а не после своего. Управление командой /bh.",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "url": "",
+    "authorList": [],
+    "credits": "",
+    "logoFile": "",
+    "screenshots": [],
+    "dependencies": []
+  }
+]
