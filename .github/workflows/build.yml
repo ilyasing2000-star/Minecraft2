@@ -31,8 +31,8 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: forge189-v4-${{ hashFiles('**/*.gradle') }}
-          restore-keys: forge189-v4-
+          key: forge189-v5-${{ hashFiles('**/*.gradle') }}
+          restore-keys: forge189-v5-
 
       # Заглушка и сборка идут одним шагом: фоновый процесс не гарантированно
       # живёт до следующего шага. Маршрутизация — через systemProp в
@@ -57,31 +57,45 @@ jobs:
           curl -sS -x http://127.0.0.1:8080 http://export.mcpbot.bspk.rs/versions.json
           echo
 
-          # Кладём манифест 1.8.9 в кеш сами. Задача getVersionJson должна
-          # делать это сама, но extractUserdev его не находит ("Inherited json file
-          # (1.8.9) not found"), поэтому раскладываем во все возможные места.
-          MCJSON=$(mktemp)
+          MCJSON=/tmp/1.8.9.json
           curl -sf -x http://127.0.0.1:8080 \
             http://s3.amazonaws.com/Minecraft.Download/versions/1.8.9/1.8.9.json -o "$MCJSON"
           grep -q '"id"' "$MCJSON"
           echo "манифест 1.8.9 получен, $(wc -c < "$MCJSON") байт"
 
           C="$HOME/.gradle/caches/minecraft"
-          for d in \
-            "$C/net/minecraft/1.8.9" \
-            "$C/net/minecraft" \
-            "$C/versions/1.8.9" \
-            "$C/versions" \
-            "$C/net/minecraftforge/forge/1.8.9-11.15.1.2318-1.8.9/userdev" \
-            "$C/net/minecraftforge/forge/1.8.9-11.15.1.2318-1.8.9"; do
-            mkdir -p "$d"
-            cp "$MCJSON" "$d/1.8.9.json"
-          done
-          echo "манифест разложен в кеш"
+
+          # extractUserdev ищет манифест файлом на диске, и в каком именно
+          # каталоге — угадать не удалось, поэтому кладём во все сразу.
+          sprinkle() {
+            mkdir -p "$C"
+            find "$C" -maxdepth 8 -type d -exec cp "$MCJSON" {}/1.8.9.json \; 2>/dev/null || true
+            for d in "$HOME/.minecraft/versions/1.8.9" "$PWD" "$PWD/build/tmp" "$PWD/run"; do
+              mkdir -p "$d" && cp "$MCJSON" "$d/1.8.9.json" || true
+            done
+            echo "манифест разложен в $(find "$C" -maxdepth 8 -name '1.8.9.json' | wc -l) каталогов кеша"
+          }
+
+          sprinkle
 
           # Качает Forge и MCP и декомпилирует майнкрафт.
           # Первый запуск минут пятнадцать, дальше берётся из кеша.
-          gradle setupDecompWorkspace --no-daemon --stacktrace
+          if ! gradle setupDecompWorkspace --no-daemon --stacktrace; then
+            echo "=== первая попытка не удалась ==="
+            echo "Теперь созданы каталоги, которых до запуска не было — повторяю раскладку."
+            sprinkle
+
+            if ! gradle setupDecompWorkspace --no-daemon --stacktrace; then
+              echo "=== диагностика: ищем в отладочном логе точный путь ==="
+              gradle extractUserdev --no-daemon --debug > /tmp/debug.log 2>&1 || true
+              echo "--- строки про inherit ---"
+              grep -n -i -B3 -A8 'inherit' /tmp/debug.log | head -120 || true
+              echo "--- строки про versionJsons и 1.8.9.json ---"
+              grep -n -i 'versionJsons\|1\.8\.9\.json' /tmp/debug.log | head -60 || true
+              exit 1
+            fi
+          fi
+
           gradle build --no-daemon --stacktrace
 
       # Видно, какие адреса дёргал ForgeGradle и что им отдала заглушка.
@@ -89,8 +103,6 @@ jobs:
         if: always()
         run: tail -n 200 /tmp/shim.log || true
 
-      # Показывает, куда плагин реально складывает файлы — по этому списку
-      # видно, где он ищет манифест 1.8.9.
       - name: Содержимое кеша
         if: always()
         run: |
