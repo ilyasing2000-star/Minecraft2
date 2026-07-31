@@ -7,9 +7,11 @@ buildscript {
         maven { name = "sonatype"; url = "https://oss.sonatype.org/content/repositories/snapshots/" }
     }
     dependencies {
-        // ForgeGradle 2.0.2 — единственная ветка, работающая с 1.8.9.
-        // Требует JDK 8 и Gradle 2.14.1, на более новых падает.
-        classpath 'net.minecraftforge.gradle:ForgeGradle:2.0.2'
+        // Ветка 2.0.2 из шаблонов 2016 года берёт манифест версии с адресов,
+        // которых больше нет, и падает на extractUserdev с «Inherited json
+        // file (1.8.9) not found». Ветка 2.3 умеет живые адреса Mojang.
+        // Требует Gradle 4.4.1 и JDK 8.
+        classpath 'net.minecraftforge.gradle:ForgeGradle:2.3-SNAPSHOT'
     }
 }
 
