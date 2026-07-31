@@ -136,7 +136,15 @@ def resolve(host, path):
     if host.endswith("files.minecraftforge.net"):
         rest = path[len("/maven"):] if path.startswith("/maven") else path
         if rest.split("?")[0].rstrip("/").endswith("/net/minecraftforge/forge/json"):
-            return FORGE_PROMOS, "application/json"
+            # Здесь надо ответить ИМЕННО неуспехом, и это не лень.
+            # ForgeExtension.checkAndSetVersion сверяет номер сборки со списком
+            # из этого джейсона. Настоящий список не отдаётся уже ниоткуда,
+            # а любой синтетический приводит к "No such version exists!".
+            # Когда джейсон не загрузился, плагин пропускает проверку и
+            # берёт версию из build.gradle как есть — ровно то, что нужно.
+            # Цена — одна строка "Error occurred parsing version!" в логе.
+            log("promos json: отдаю 404 нарочно, чтобы плагин пропустил проверку версии")
+            return None, None
         return fetch(FORGE_MAVEN + rest)
 
     if host == "s3.amazonaws.com":
