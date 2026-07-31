@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ForgeGradle 2.0.2 работает только на JDK 8.
+      - name: JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      # И только на старом Gradle. Новые ветки его ломают.
+      - name: Gradle 2.14.1
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-2.14.1-bin.zip
+          unzip -q gradle-2.14.1-bin.zip -d $HOME
+          echo "$HOME/gradle-2.14.1/bin" >> $GITHUB_PATH
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: forge189-${{ hashFiles('**/*.gradle') }}
+          restore-keys: forge189-
+
+      # Качает Forge и MCP и декомпилирует майнкрафт.
+      # Первый запуск минут пятнадцать, дальше берётся из кеша.
+      - name: setupDecompWorkspace
+        run: gradle setupDecompWorkspace --no-daemon --stacktrace
+
+      - name: build
+        run: gradle build --no-daemon --stacktrace
+
+      - name: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoblockhit-jar
+          path: build/libs/*.jar
